@@ -6,7 +6,10 @@ def get_vector_register_value(reg_name):
 
     try:
         val = gdb.parse_and_eval("$" + reg_name)
-        word_field = val.type["b"]
+        try:
+            word_field = val.type["b"]
+        except:
+            return None
         values = val[word_field]
         arr_range = values.type.range()
 
@@ -31,24 +34,6 @@ def get_instruction():
     pc = f.pc()
     ins = f.architecture().disassemble(pc, count=1)
     return ins[0]
-
-def is_masked_op():
-    instr = get_instruction()['asm']
-    if "v0.t" in instr:
-        return True
-    else:
-        False
-
-def get_mask():
-    instr = get_instruction()['asm']
-    if "v0.t" in instr:
-        vl = int.from_bytes(get_status_register_value("vl"), "little")
-        mask_reg = get_status_register_value("v0")
-        mask_int = int.from_bytes(mask_reg, "little", signed=False)
-        bits = [(mask_int >> i) & 1 for i in range(vl)]
-        return bits
-    else:
-        return None
 
 def get_vstart():
     return int.from_bytes(get_status_register_value("vstart"), "little")
@@ -89,8 +74,9 @@ def get_active_elements():
     vlenb = int.from_bytes(get_status_register_value("vlenb"), "little")
     vstart = get_vstart()
     vl = get_vl()
-
-    vlmax = int((vlenb * 8 * lmul) // sew)
+    
+    lmul_calc = 1 if lmul <= 1 else lmul
+    vlmax = int((vlenb * 8 * lmul_calc) // sew)
 
     head = min(vstart, vl)
     active = max(vl - vstart, 0)
@@ -98,16 +84,9 @@ def get_active_elements():
 
     active = [1 if (vstart <= i < vl) else 0 for i in range(vlmax)]
 
-    mask = get_mask()
-    if mask is not None:
-        upto = min(vl, len(mask))
-        for i in range(upto):
-            if active[i] == 1 and mask[i] != 1:
-                active[i] = 0
     return active 
 
 
-#TODO for now segmented load/store instructions are ignored
 """
     all depend on LMUL if LMUL > 1, but LMUL is already handled by the visualization
     executing segmented instructions with EEW != SEW is illegal
@@ -200,7 +179,6 @@ class VectorWindow:
 
     pinned_stat_regs = ["vlenb", "vl", "vtype"]
     pinned_vec_regs = ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v23", "v24", "v25"]
-
     stat_regs_content = {}
     vec_regs_content = {}
 
@@ -229,7 +207,6 @@ class VectorWindow:
     def poll_vec_regs(self):
         vec_regs_content_old = self.vec_regs_content.copy()
         for reg in vec_regs_content_old.keys():
-        #    if reg not in self.pinned_vec_regs:
             del self.vec_regs_content[reg]
 
         vlenb = int.from_bytes(get_status_register_value("vlenb"), "little")
@@ -257,7 +234,6 @@ class VectorWindow:
             vlmul = 1/2
         else:
             vlmul = 1
-        # TODO vlmul determines grouping of vector registers; not yet implemented
 
         elem_size = vsew // 8
 
@@ -319,13 +295,14 @@ class VectorWindow:
         if(not self.pinned_vec_regs):
             self.lines += ["No vector registers pinned. Use the 'pin' command to pin vector registers."]
             return
+        if get_vector_register_value("v0") == None:
+            self.lines += ["Vector registers currently uninitialized"]
+            return
         self.poll_vec_regs()
         longest_reg = max([len(reg) for key, reg in self.vec_regs_content.items()])
-
         # get info for masking
         reg_active, reg_group_size = get_masked_result_or_store_src()
         active_elems = get_active_elements()
-
         # determine amount of digits per element for hex display
         vtype = int.from_bytes(self.stat_regs_content["vtype"], "little")
         vsew = 8 << ((vtype >> 3) & 0b111)
@@ -334,27 +311,25 @@ class VectorWindow:
         idx_col_width = [len(str(longest_reg)) + 2]
         vec_col_widths = [max(len(str(key)), *(len(str(item)) for item in lst)) for key, lst in self.vec_regs_content.items()] if not self.hex_display else [max(len(str(key)), *(len(f"{item:0{len(hex(item))}x}") for item in lst)) for key, lst in self.vec_regs_content.items()]
         col_widths = idx_col_width + vec_col_widths
-
-        rows = ["  ".join([(" " * col_widths[0])] + [str(reg).center(col_widths[c]) for c, reg in enumerate(self.vec_regs_content.keys())])]
+        rows = ["  ".join([(" " * col_widths[0])] + [str(reg).rjust(col_widths[c+1]) for c, reg in enumerate(self.vec_regs_content.keys())])]
         for r in range(longest_reg):
             row = [("[" + str(r) + "]").center(col_widths[0])]
             for c, (name,reg) in enumerate(self.vec_regs_content.items()):
+                w = col_widths[c+1]
                 val = (str(reg[r]) if not self.hex_display else hex(reg[r])) if r < len(reg) else ""
                 reg_number = int(name[1:])
-                reg_active_base_number = int(reg_active[1:]) if 'v' in reg_active else None
-                cell = val.center(col_widths[c])
-                if reg_active_base_number is not None and reg_active_base_number <= reg_number < reg_active_base_number + reg_group_size:
-                    # register is part of masked operation
-                    element = "v" + str(reg_number)
-                    cell = val.center(col_widths[c])
-                    active = active_elems[r] if len(active_elems) > r else None # Sometimes index out of bounds
-                    if active == 0:
-                        # Grey background for inactive element
-                        cell = (f"\x1b[100m{val.center(col_widths[c])}\x1b[0m").center(col_widths[c])
-                        #cell = (f"\x1b[48;5;236m{val}\x1b[0m").center(col_widths[c])
+                text = str(val).rjust(w)
+                cell = text
+                #cell = val.center(w)
+                active = active_elems[r] if len(active_elems) > r else 0 # Sometimes index out of bounds
+                if active == 0:
+                    # Grey background for inactive element
+                    DIM_GRAY = "\x1b[2m\x1b[90m"
+                    RESET    = "\x1b[0m"
+                    cell = f"{DIM_GRAY}{text}{RESET}"
+                    #cell = f"{DIM_GRAY}{str(val).center(w)}{RESET}".center(w)
                 row.append(cell)
             rows.append("  ".join(row))
-        #rows = [row.center(self._tui_window.width) for row in rows]
         rows = [ansi_center(row, self._tui_window.width) for row in rows]
 
         self.lines += rows
