@@ -1,3 +1,3 @@
 mkdir -p /usr/share/gdb/python
-cp src/rvvis.py /usr/share/gdb/python/rvvis.py
+cp src/libero.py /usr/share/gdb/python/libero.py
 cp src/.gdbinit ~/.gdbinit
